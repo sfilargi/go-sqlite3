@@ -791,6 +791,7 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 	busyTimeout := 5000
 	foreignKeys := -1
 	recursiveTriggers := -1
+	journalMode := ""
 	pos := strings.IndexRune(dsn, '?')
 	if pos >= 1 {
 		params, err := url.ParseQuery(dsn[pos+1:])
@@ -857,6 +858,26 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 			}
 		}
 
+		// _journal_mode
+		if val := params.Get("_journal_mode"); val != "" {
+			switch val {
+			case "delete":
+				journalMode = "DELETE"
+			case "truncate":
+				journalMode = "TRUNCATE"
+			case "persist":
+				journalMode = "PERSIST"
+			case "memory":
+				journalMode = "MEMORY"
+			case "wal":
+				journalMode = "WAL"
+			case "off":
+				journalMode = "OFF"
+			default:
+				return nil, fmt.Errorf("Invalid _journal_mode: %v", val)
+			}
+		}
+
 		if !strings.HasPrefix(dsn, "file:") {
 			dsn = dsn[:pos]
 		}
@@ -891,6 +912,13 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 			return lastError(db)
 		}
 		return nil
+	}
+	if journalMode != "" {
+		err := exec(fmt.Sprintf("PRAGMA journal_mode=%s;", journalMode))
+		if err != nil {
+			C.sqlite3_close_v2(db)
+			return nil, err
+		}
 	}
 	if foreignKeys == 0 {
 		if err := exec("PRAGMA foreign_keys = OFF;"); err != nil {
