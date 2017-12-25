@@ -141,6 +141,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/url"
 	"reflect"
 	"runtime"
@@ -787,6 +788,7 @@ func (d *SQLiteDriver) open_(dsn string) (driver.Conn, error) {
 		return nil, errors.New("sqlite library was not compiled for thread-safe operation")
 	}
 
+	original_dsn := dsn
 	var loc *time.Location
 	txlock := "BEGIN"
 	busyTimeout := 5000
@@ -944,7 +946,7 @@ func (d *SQLiteDriver) open_(dsn string) (driver.Conn, error) {
 		}
 	}
 
-	conn := &SQLiteConn{db: db, loc: loc, txlock: txlock, dsn: dsn}
+	conn := &SQLiteConn{db: db, loc: loc, txlock: txlock, dsn: original_dsn}
 
 	if len(d.Extensions) > 0 {
 		if err := conn.loadExtensions(d.Extensions); err != nil {
@@ -969,12 +971,15 @@ func (c *SQLiteConn) Close() error {
 	connectionMapMutex.Lock()
 	defer connectionMapMutex.Unlock()
 	if connref, ok := connectionMap[c.dsn]; ok {
-		if connref.count >= 1 {
+		if connref.count > 1 {
+			log.Printf("Not closing: %v", connref.count)
 			connref.count -= 1
 			return nil
 		}
+		log.Printf("Closing: %v", connref.count)
 		delete(connectionMap, c.dsn)
 	}
+	log.Printf("Closing: %s", c.dsn)
 
 	rv := C.sqlite3_close_v2(c.db)
 	if rv != C.SQLITE_OK {
@@ -1051,6 +1056,7 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 	connectionMapMutex.Lock()
 	defer connectionMapMutex.Unlock()
 	if connref, ok := connectionMap[dsn]; ok {
+		log.Printf("Reusing connection: %v", connref.count)
 		connref.count += 1
 		return connref.conn, nil
 	}
