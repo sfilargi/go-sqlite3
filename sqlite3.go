@@ -203,6 +203,7 @@ type SQLiteConn struct {
 	txlock      string
 	funcs       []*functionInfo
 	aggregators []*aggInfo
+	dsn         string
 }
 
 // SQLiteTx implemen sql.Tx.
@@ -781,7 +782,7 @@ func errorString(err Error) string {
 //     Enable or disable enforcement of foreign keys.  X can be 1 or 0.
 //   _recursive_triggers=X
 //     Enable or disable recursive triggers.  X can be 1 or 0.
-func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
+func (d *SQLiteDriver) open_(dsn string) (driver.Conn, error) {
 	if C.sqlite3_threadsafe() == 0 {
 		return nil, errors.New("sqlite library was not compiled for thread-safe operation")
 	}
@@ -943,7 +944,7 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 		}
 	}
 
-	conn := &SQLiteConn{db: db, loc: loc, txlock: txlock}
+	conn := &SQLiteConn{db: db, loc: loc, txlock: txlock, dsn: dsn}
 
 	if len(d.Extensions) > 0 {
 		if err := conn.loadExtensions(d.Extensions); err != nil {
@@ -964,6 +965,17 @@ func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
 
 // Close the connection.
 func (c *SQLiteConn) Close() error {
+
+	connectionMapMutex.Lock()
+	defer connectionMapMutex.Unlock()
+	if connref, ok := connectionMap[c.dsn]; ok {
+		if connref.count >= 1 {
+			connref.count -= 1
+			return nil
+		}
+		delete(connectionMap, c.dsn)
+	}
+
 	rv := C.sqlite3_close_v2(c.db)
 	if rv != C.SQLITE_OK {
 		return c.lastError()
@@ -1024,6 +1036,37 @@ const (
 	SQLITE_LIMIT_TRIGGER_DEPTH       = C.SQLITE_LIMIT_TRIGGER_DEPTH
 	SQLITE_LIMIT_WORKER_THREADS      = C.SQLITE_LIMIT_WORKER_THREADS
 )
+
+type connRef struct {
+	conn  driver.Conn
+	count int
+}
+
+var (
+	connectionMap      = make(map[string]*connRef)
+	connectionMapMutex = &sync.Mutex{}
+)
+
+func (d *SQLiteDriver) Open(dsn string) (driver.Conn, error) {
+	connectionMapMutex.Lock()
+	defer connectionMapMutex.Unlock()
+	if connref, ok := connectionMap[dsn]; ok {
+		connref.count += 1
+		return connref.conn, nil
+	}
+
+	conn, err := d.open_(dsn)
+	if err != nil {
+		return nil, err
+	}
+
+	connref := &connRef{
+		conn:  conn,
+		count: 1,
+	}
+	connectionMap[dsn] = connref
+	return conn, nil
+}
 
 // GetLimit returns the current value of a run-time limit.
 // See: sqlite3_limit, http://www.sqlite.org/c3ref/limit.html
